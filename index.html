@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Vault · Ricezione sicura</title>
+<style>
+  :root{--bg:#eef1f4;--ink:#14213d;--mute:#5b6677;--line:#c9d1db;--card:#fff;--ok:#0f766e;--err:#b42318}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:var(--bg);color:var(--ink);
+       font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  main{width:100%;max-width:460px}
+  h1{font:600 1.6rem/1.2 Georgia,"Times New Roman",serif;margin:0 0 6px}
+  p.sub{margin:0 0 24px;color:var(--mute)}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:24px}
+  .hidden{display:none!important}
+  button{font:inherit;cursor:pointer;border-radius:6px;border:1px solid var(--ink);background:var(--ink);color:#fff;padding:10px 16px}
+  button.ghost{background:transparent;color:var(--ink);border-color:var(--line);padding:6px 10px;font-size:.9rem}
+  button:focus-visible,input:focus-visible{outline:3px solid #2f6fed;outline-offset:2px}
+  button:disabled{opacity:.5;cursor:wait}
+  #pin{display:flex;gap:10px;margin:18px 0}
+  #pin input{width:100%;min-width:0;aspect-ratio:1/1.2;text-align:center;font:600 1.8rem ui-monospace,Menlo,Consolas,monospace;
+             border:2px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
+  #pin input:focus{border-color:var(--ink)}
+  #msg{min-height:1.5em;margin:12px 0 0;font-size:.95rem}
+  #msg.err{color:var(--err)} #msg.ok{color:var(--ok)}
+  .who{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:16px;font-size:.9rem;color:var(--mute)}
+  .entry{border-top:1px solid var(--line);padding:14px 0}
+  .entry:first-child{border-top:0;padding-top:0}
+  .entry h3{margin:0 0 6px;font-size:1.05rem}
+  .row{display:flex;align-items:center;gap:8px;margin:4px 0;flex-wrap:wrap}
+  .row span.k{color:var(--mute);width:5.5em;font-size:.9rem}
+  .row code{flex:1;min-width:0;overflow-wrap:anywhere;font:.95rem ui-monospace,Menlo,Consolas,monospace}
+  pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font:.95rem ui-monospace,Menlo,Consolas,monospace}
+  .timer{font-size:.85rem;color:var(--mute);margin-top:16px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Ricezione sicura</h1>
+  <p class="sub" id="sub">Accedi per ricevere i dati dal tuo telefono.</p>
+
+  <!-- 1. Login -->
+  <section class="panel" id="s-login">
+    <button id="btn-login">Accedi con Google</button>
+    <p id="msg-login" class="err" role="alert"></p>
+  </section>
+
+  <!-- 2. Sessione + PIN -->
+  <section class="panel hidden" id="s-pin">
+    <div class="who"><span id="who"></span><button class="ghost" id="btn-logout">Esci</button></div>
+    <div id="sess-ask" class="hidden">
+      <label for="sess-in">ID sessione</label>
+      <input id="sess-in" autocomplete="off" style="width:100%;padding:10px;margin:6px 0 14px;border:1px solid var(--line);border-radius:6px;font:inherit">
+    </div>
+    <label id="pin-label">PIN a 5 cifre mostrato sul telefono</label>
+    <div id="pin" role="group" aria-labelledby="pin-label"></div>
+    <button id="btn-go">Decifra</button>
+    <p id="msg" role="status" aria-live="polite"></p>
+  </section>
+
+  <!-- 3. Segreti -->
+  <section class="panel hidden" id="s-out">
+    <div class="who"><span>Dati decifrati</span><button class="ghost" id="btn-clear">Cancella</button></div>
+    <div id="out"></div>
+    <p class="timer" id="timer"></p>
+  </section>
+</main>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { getFirestore, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+/* ====== CONFIGURAZIONE ====== */
+  const firebaseConfig = {
+    apiKey: "AIzaSyCfuzLZN8i9YfWgt1tHQ-QybOWG8wzdkCE",
+    authDomain: "brontosaurus-50fab.firebaseapp.com",
+    projectId: "brontosaurus-50fab",
+    storageBucket: "brontosaurus-50fab.firebasestorage.app",
+    messagingSenderId: "155996798390",
+    appId: "1:155996798390:web:4e251a4c71690320e99517"
+  };
+// Whitelist lato client (solo UX). Quella VERA è nelle regole Firestore (vedi firestore.rules).
+const WHITELIST = ["tuo.nome@gmail.com"];
+const SESSIONS_COLLECTION = "sessions";
+const PBKDF2_ITERATIONS_DEFAULT = 200000;
+const AUTO_CLEAR_SECONDS = 60;
+/* ============================ */
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const $ = id => document.getElementById(id);
+const show = id => ["s-login","s-pin","s-out"].forEach(s => $(s).classList.toggle("hidden", s !== id));
+const setMsg = (t, cls = "") => { $("msg").textContent = t; $("msg").className = cls; };
+
+/* ---------- utilità byte ---------- */
+const b64ToBytes = s => {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+};
+const xorBytes = (a, b) => {
+  if (a.length !== b.length) throw new Error("Lunghezze diverse in XOR");
+  return a.map((v, i) => v ^ b[i]);
+};
+
+/* ---------- crypto ---------- */
+// P = PBKDF2(PIN, salt) con la stessa lunghezza di K'
+async function derivePinKey(pin, salt, iterations, lenBytes) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations }, base, lenBytes * 8);
+  return new Uint8Array(bits);
+}
+// payload = IV (12 byte) || ciphertext+tag (formato standard AES-GCM)
+async function decryptPayload(K, payload) {
+  const key = await crypto.subtle.importKey("raw", K, "AES-GCM", false, ["decrypt"]);
+  const iv = payload.slice(0, 12), data = payload.slice(12);
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
+  return new TextDecoder().decode(plain);
+}
+
+/* ---------- Login + whitelist ---------- */
+const isAllowed = email => WHITELIST.map(e => e.toLowerCase()).includes((email || "").toLowerCase());
+
+$("btn-login").onclick = async () => {
+  $("msg-login").textContent = "";
+  try { await signInWithPopup(auth, new GoogleAuthProvider()); }
+  catch (e) { $("msg-login").textContent = "Accesso non riuscito. Riprova."; }
+};
+$("btn-logout").onclick = () => signOut(auth);
+
+onAuthStateChanged(auth, async user => {
+  wipe();
+  if (!user) return show("s-login");
+  if (!user.emailVerified || !isAllowed(user.email)) {
+    await signOut(auth);
+    $("msg-login").textContent = "Questo account Google non è autorizzato.";
+    return show("s-login");
+  }
+  $("who").textContent = user.email;
+  const sid = new URLSearchParams(location.search).get("session");
+  $("sess-ask").classList.toggle("hidden", !!sid);
+  if (sid) $("sess-in").value = sid;
+  setMsg("");
+  show("s-pin");
+  $("pin").children[0].focus();
+});
+
+/* ---------- Campo PIN a 5 caselle ---------- */
+const boxes = [];
+for (let i = 0; i < 5; i++) {
+  const el = document.createElement("input");
+  el.inputMode = "numeric"; el.maxLength = 1; el.autocomplete = "off";
+  el.setAttribute("aria-label", `Cifra ${i + 1} di 5`);
+  el.oninput = () => {
+    el.value = el.value.replace(/\D/g, "").slice(-1);
+    if (el.value && boxes[i + 1]) boxes[i + 1].focus();
+    if (getPin().length === 5) $("btn-go").click();
+  };
+  el.onkeydown = e => { if (e.key === "Backspace" && !el.value && boxes[i - 1]) boxes[i - 1].focus(); };
+  el.onpaste = e => {
+    const t = (e.clipboardData.getData("text") || "").replace(/\D/g, "").slice(0, 5);
+    if (!t) return;
+    e.preventDefault();
+    [...t].forEach((c, k) => boxes[k].value = c);
+    boxes[Math.min(t.length, 4)].focus();
+  };
+  boxes.push(el); $("pin").appendChild(el);
+}
+const getPin = () => boxes.map(b => b.value).join("");
+
+/* ---------- Flusso principale ---------- */
+$("btn-go").onclick = async () => {
+  const pin = getPin();
+  const sid = ($("sess-in").value || "").trim();
+  if (!/^\d{5}$/.test(pin)) return setMsg("Inserisci tutte e 5 le cifre del PIN.", "err");
+  if (!/^[\w-]{3,128}$/.test(sid)) return setMsg("ID sessione mancante o non valido.", "err");
+
+  $("btn-go").disabled = true; setMsg("Decifro…");
+  try {
+    const snap = await getDoc(doc(db, SESSIONS_COLLECTION, sid));
+    if (!snap.exists()) throw new Error("Sessione non trovata o scaduta.");
+    const d = snap.data();
+
+    const Kp = b64ToBytes(d.obfuscatedKey);          // K'
+    const salt = b64ToBytes(d.salt);
+    const payload = b64ToBytes(d.encryptedPayload);
+    const P = await derivePinKey(pin, salt, d.iterations || PBKDF2_ITERATIONS_DEFAULT, Kp.length);
+    const K = xorBytes(Kp, P);                       // K = K' ⊕ P
+
+    let text;
+    try { text = await decryptPayload(K, payload); }
+    catch { throw new Error("PIN errato o dati alterati."); }
+
+    render(text);
+    K.fill(0); P.fill(0);
+  } catch (e) {
+    setMsg(e.message || "Errore imprevisto.", "err");
+    boxes.forEach(b => b.value = ""); boxes[0].focus();
+  } finally { $("btn-go").disabled = false; }
+};
+
+/* ---------- Visualizzazione ---------- */
+let clearTimer, tick;
+function render(text) {
+  const out = $("out"); out.replaceChildren();
+  let items = null;
+  try { const j = JSON.parse(text); items = Array.isArray(j) ? j : [j]; } catch {}
+  if (items && items.every(x => x && typeof x === "object")) {
+    items.forEach(it => {
+      const box = document.createElement("div"); box.className = "entry";
+      const h = document.createElement("h3");
+      h.textContent = it.title || it.name || it.site || "Voce";
+      box.appendChild(h);
+      Object.entries(it).forEach(([k, v]) => {
+        if (["title", "name", "site"].includes(k) && it[k] === h.textContent) return;
+        box.appendChild(field(k, String(v), /pass|pwd|secret|token|key/i.test(k)));
+      });
+      out.appendChild(box);
+    });
+  } else {
+    const pre = document.createElement("pre"); pre.textContent = text; out.appendChild(pre);
+  }
+  show("s-out");
+  let left = AUTO_CLEAR_SECONDS;
+  const upd = () => $("timer").textContent = `I dati verranno cancellati dallo schermo tra ${left}s.`;
+  upd(); clearInterval(tick); clearTimeout(clearTimer);
+  tick = setInterval(() => { left--; upd(); }, 1000);
+  clearTimer = setTimeout(() => { wipe(); show("s-pin"); setMsg("Dati cancellati dallo schermo."); }, AUTO_CLEAR_SECONDS * 1000);
+}
+function field(label, value, secret) {
+  const row = document.createElement("div"); row.className = "row";
+  const k = document.createElement("span"); k.className = "k"; k.textContent = label;
+  const c = document.createElement("code"); c.textContent = secret ? "•".repeat(Math.min(value.length, 12)) : value;
+  const copy = document.createElement("button"); copy.className = "ghost"; copy.textContent = "Copia";
+  copy.onclick = async () => { await navigator.clipboard.writeText(value); copy.textContent = "Copiato"; setTimeout(() => copy.textContent = "Copia", 1500); };
+  row.append(k, c);
+  if (secret) {
+    const eye = document.createElement("button"); eye.className = "ghost"; eye.textContent = "Mostra";
+    let vis = false;
+    eye.onclick = () => { vis = !vis; c.textContent = vis ? value : "•".repeat(Math.min(value.length, 12)); eye.textContent = vis ? "Nascondi" : "Mostra"; };
+    row.append(eye);
+  }
+  row.append(copy);
+  return row;
+}
+function wipe() {
+  clearInterval(tick); clearTimeout(clearTimer);
+  $("out").replaceChildren(); boxes.forEach(b => b.value = "");
+}
+$("btn-clear").onclick = () => { wipe(); show("s-pin"); setMsg(""); };
+</script>
+</body>
+</html>
