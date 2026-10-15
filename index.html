@@ -83,8 +83,6 @@ import { getFirestore, doc, getDoc } from "https://www.gstatic.com/firebasejs/10
     messagingSenderId: "155996798390",
     appId: "1:155996798390:web:4e251a4c71690320e99517"
   };
-// Whitelist lato client (solo UX). Quella VERA è nelle regole Firestore (vedi firestore.rules).
-const WHITELIST = ["tuo.nome@gmail.com"];
 const SESSIONS_COLLECTION = "sessions";
 const PBKDF2_ITERATIONS_DEFAULT = 200000;
 const AUTO_CLEAR_SECONDS = 60;
@@ -123,9 +121,6 @@ async function decryptPayload(K, payload) {
   return new TextDecoder().decode(plain);
 }
 
-/* ---------- Login + whitelist ---------- */
-const isAllowed = email => WHITELIST.map(e => e.toLowerCase()).includes((email || "").toLowerCase());
-
 $("btn-login").onclick = async () => {
   $("msg-login").textContent = "";
   try { await signInWithPopup(auth, new GoogleAuthProvider()); }
@@ -136,7 +131,7 @@ $("btn-logout").onclick = () => signOut(auth);
 onAuthStateChanged(auth, async user => {
   wipe();
   if (!user) return show("s-login");
-  if (!user.emailVerified || !isAllowed(user.email)) {
+  if (!user.emailVerified) {
     await signOut(auth);
     $("msg-login").textContent = "Questo account Google non è autorizzato.";
     return show("s-login");
